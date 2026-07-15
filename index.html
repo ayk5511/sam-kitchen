@@ -123,7 +123,7 @@ function balanceDay(slots,target){let base=0;for(const s of Object.values(slots)
   if(base<=0)return;const f=target/base;for(const k in slots){if(slots[k]){let p=Math.round(slots[k].p*f*4)/4;slots[k].p=Math.min(2,Math.max(.5,p));}}}
 function defaultState(){
   const wk={};DAYS.forEach(d=>{wk[d]={};(STARTER[d]||[]).forEach((nm,i)=>{wk[d][SLOTS[i]]={r:nm,p:1};});});
-  const s={onboarded:false,settings:{weightLb:130,goalLb:125,heightIn:67,age:23,activity:1.4,phase:'cut',startDate:null,manualKcal:null,aiEndpoint:''},
+  const s={onboarded:false,settings:{weightLb:130,goalLb:125,heightIn:67,age:23,gender:'female',activity:1.375,formula:'mifflin',bodyFat:22,goalRate:-1,zigzag:false,phase:'cut',startDate:null,manualKcal:null,aiEndpoint:''},
     excludes:{},favorites:[],ratings:{},week:wk,shopChecked:{},shopCustom:[],shopExtra:[],hideStaples:true,log:{},weights:[],customRecipes:[],
     reminders:{notify:false,prep:true,weigh:true,protein:true},dismissed:{},lastBackup:null};
   DAYS.forEach(d=>balanceDay(s.week[d],1550));
@@ -134,18 +134,41 @@ DAYS.forEach(d=>{if(!S.week[d])S.week[d]={};for(const k in S.week[d]){const v=S.
 if(!S.settings)S.settings=defaultState().settings;
 if(!S.reminders)S.reminders={notify:false,prep:true,weigh:true,protein:true};
 if(!S.customRecipes)S.customRecipes=[];
+(function migrateCalc(){const s=S.settings;   // upgrade older saves to the calculator model
+  if(!s.gender)s.gender='female';
+  if(!s.formula)s.formula='mifflin';
+  if(s.bodyFat==null)s.bodyFat=22;
+  if(s.goalRate==null)s.goalRate=(s.phase==='maintain'?0:s.phase==='reverse'?-0.5:-1);
+  if(s.zigzag==null)s.zigzag=false;
+  if([1.2,1.375,1.465,1.55,1.725,1.9].indexOf(s.activity)<0)s.activity=1.375;
+})();
 rebuildRX();
 function save(){localStorage.setItem(KEY,JSON.stringify(S));}
 
 // ---------- targets ----------
-function phaseForWeek(w){return w<=8?'cut':w<=13?'reverse':'maintain';}
 function currentWeek(){if(!S.settings.startDate)return 1;const ms=Date.now()-new Date(S.settings.startDate).getTime();return Math.max(1,Math.floor(ms/6048e5)+1);}
-function targets(){const s=S.settings,kg=s.weightLb/2.2046,cm=s.heightIn*2.54;
-  const bmr=10*kg+6.25*cm-5*s.age-161,tdee=(s.manualKcal?s.manualKcal:bmr*s.activity);
-  const cut=Math.round((tdee-350)/10)*10,maint=Math.round(tdee/10)*10;
-  const ph=s.phase, kcal=s.manualKcal?Math.round(s.manualKcal/10)*10:(ph==='cut'?cut:ph==='reverse'?Math.round((cut+maint)/2/10)*10:maint);
-  const protein=Math.round(kg*1.9/5)*5;
-  return {bmr:Math.round(bmr),tdee:Math.round(s.manualKcal||bmr*s.activity),cut,maint,kcal,protein,fiber:30,iron:18,calcium:1000};}
+// ---------- CALORIE CALCULATOR (mirrors calculator.net/calorie-calculator.html) ----------
+// Activity factors for calculator.net's six labels (its page documents the 1.2–1.95 band).
+const ACTIVITY=[[1.2,'Sedentary — little or no exercise'],[1.375,'Light — exercise 1–3×/week'],[1.465,'Moderate — exercise 4–5×/week'],[1.55,'Active — daily or intense 3–4×/week'],[1.725,'Very active — intense 6–7×/week'],[1.9,'Extra active — very intense daily / physical job']];
+const KCAL_PER_LB=3500;   // calculator.net: 1 lb ≈ 3500 kcal, so 1 lb/week = 500 kcal/day
+const GOALS=[[0,'Maintain weight'],[-0.5,'Mild weight loss'],[-1,'Weight loss'],[-2,'Extreme weight loss'],[0.5,'Mild weight gain'],[1,'Weight gain'],[2,'Fast weight gain']];
+function bmrOf(s){const kg=s.weightLb/2.2046,cm=s.heightIn*2.54,A=s.age,male=s.gender==='male';
+  if(s.formula==='katch')return 370+21.6*(1-((s.bodyFat||22)/100))*kg;                                            // Katch-McArdle
+  if(s.formula==='harris')return male?(13.397*kg+4.799*cm-5.677*A+88.362):(9.247*kg+3.098*cm-4.330*A+447.593);    // Revised Harris-Benedict
+  return male?(10*kg+6.25*cm-5*A+5):(10*kg+6.25*cm-5*A-161);}                                                     // Mifflin-St Jeor (default)
+function safetyFloor(){return S.settings.gender==='male'?1500:1200;}   // Harvard Health minimums cited by calculator.net
+function goalKcal(tdee,rate){return Math.round(tdee+rate*KCAL_PER_LB/7);}
+function goalLabel(r){return r==0?'maintain':`${r<0?'lose':'gain'} ${Math.abs(r)} lb/wk`;}
+function targets(){const s=S.settings,kg=s.weightLb/2.2046;
+  const bmr=bmrOf(s),tdee=Math.round(s.manualKcal?s.manualKcal:bmr*s.activity);
+  const rate=(s.goalRate==null?-1:s.goalRate),kcal=goalKcal(tdee,rate);
+  return {bmr:Math.round(bmr),tdee,maint:tdee,rate,kcal,floor:safetyFloor(),unsafe:kcal<safetyFloor(),
+          protein:Math.round(kg*1.9/5)*5,fiber:30,iron:18,calcium:1000};}
+// Zigzag: same weekly total, 3 higher / 4 lower days (calculator.net example: 2300×3 + 1775×4 = 14,000/wk)
+function zigzagWeek(target){const high=target+300,low=Math.round((target*7-3*high)/4);
+  return ['low','low','high','low','high','high','low'].map(p=>p==='high'?high:low);}
+function dayTarget(i){const t=targets();return S.settings.zigzag?zigzagWeek(t.kcal)[i]:t.kcal;}
+function todayIdx(){return (new Date().getDay()+6)%7;}
 
 // ---------- helpers ----------
 const UNI={'½':.5,'¼':.25,'¾':.75,'⅓':1/3,'⅔':2/3,'⅛':.125};
@@ -176,8 +199,8 @@ function dueNudges(){const out=[];const wd=weekdayShort();const tk=todayKey();
   const t=targets(),tot=macroTotalsLog(S.log[tk]||[]);const hr=new Date().getHours();
   if(S.reminders.protein&&hr>=17&&tot.protein_g<t.protein*0.7&&!S.dismissed['prot-'+tk])out.push(['prot','💪',`You're at ${n(tot.protein_g)}g protein — about ${n(t.protein-tot.protein_g)}g to go. Make dinner protein-forward.`]);
   return out;}
-function viewToday(){const t=targets(),tk=todayKey(),eaten=(S.log[tk]||[]),tot=macroTotalsLog(eaten);
-  const pPct=Math.min(100,tot.protein_g/t.protein*100),kPct=Math.min(100,tot.kcal/t.kcal*100),fPct=Math.min(100,tot.fiber_g/t.fiber*100);
+function viewToday(){const t=targets(),tgt=dayTarget(todayIdx()),tk=todayKey(),eaten=(S.log[tk]||[]),tot=macroTotalsLog(eaten);
+  const pPct=Math.min(100,tot.protein_g/t.protein*100),kPct=Math.min(100,tot.kcal/tgt*100),fPct=Math.min(100,tot.fiber_g/t.fiber*100);
   const R=52,C=2*Math.PI*R,off=C*(1-pPct/100);const wd=weekdayShort();
   const plan=S.week[wd]||{};const planNames=Object.values(plan).map(s=>s&&s.r);
   const slotRows=SLOTS.map(sl=>{const s=plan[sl];if(!s)return '';const on=eaten.some(e=>e.r===s.r&&Math.abs((e.p||1)-s.p)<.01);
@@ -194,11 +217,11 @@ function viewToday(){const t=targets(),tk=todayKey(),eaten=(S.log[tk]||[]),tot=m
   <button class="btn" id="snap" style="width:100%;margin-bottom:12px;font-size:15px;padding:13px">📷 Snap a meal → log the macros</button>
   <div class="card"><div class="ring-wrap">
     <svg class="ring" width="120" height="120" viewBox="0 0 120 120"><circle cx="60" cy="60" r="${R}" fill="none" stroke="var(--card2)" stroke-width="11"/><circle cx="60" cy="60" r="${R}" fill="none" stroke="var(--acc)" stroke-width="11" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${off}" transform="rotate(-90 60 60)"/><text x="60" y="55" text-anchor="middle" font-size="22" font-weight="800" fill="var(--ink)">${n(tot.protein_g)}</text><text x="60" y="74" text-anchor="middle" font-size="11" fill="var(--mut)">/ ${t.protein}g P</text></svg>
-    <div style="flex:1"><div class="small muted">Calories</div><div class="row"><b>${n(tot.kcal)}</b><span class="muted small">/ ${t.kcal} kcal</span></div><div class="bar ${kPct>108?'red':''}"><i style="width:${kPct}%"></i></div>
+    <div style="flex:1"><div class="small muted">Calories</div><div class="row"><b>${n(tot.kcal)}</b><span class="muted small">/ ${tgt} kcal</span></div><div class="bar ${kPct>108?'red':''}"><i style="width:${kPct}%"></i></div>
       <div class="small muted" style="margin-top:8px">Fiber</div><div class="row"><b>${n(tot.fiber_g)}</b><span class="muted small">/ ${t.fiber}g</span></div><div class="bar ${fPct<60?'amber':''}"><i style="width:${fPct}%"></i></div></div></div>
     <div class="mini"><div><div class="tiny muted">Iron ${n(tot.iron_mg)}/${t.iron}mg</div><div class="bar ${tot.iron_mg<t.iron*.6?'amber':''}"><i style="width:${Math.min(100,tot.iron_mg/t.iron*100)}%"></i></div></div>
       <div><div class="tiny muted">Calcium ${n(tot.calcium_mg)}/${t.calcium}mg</div><div class="bar ${tot.calcium_mg<t.calcium*.6?'amber':''}"><i style="width:${Math.min(100,tot.calcium_mg/t.calcium*100)}%"></i></div></div></div>
-    <div class="tiny muted" style="margin-top:10px">Week ${cw} · phase <b>${S.settings.phase}</b> · omega-3 meals this week: <b>${o3}</b>/3 · <a href="#" data-go2="me">adjust ›</a></div>
+    <div class="tiny muted" style="margin-top:10px">Week ${cw} · goal <b>${goalLabel(t.rate)}</b>${S.settings.zigzag?' · zigzag day':''} · omega-3 this week: <b>${o3}</b>/3 · <a href="#" data-go2="me">adjust ›</a></div>
   </div>
   ${cal?`<div class="card" style="border-color:var(--acc)"><b class="small">📈 Reality check (measured)</b><div class="small" style="margin-top:5px">${cal.msg}</div><button class="btn sm" id="applycal" style="margin-top:8px">Use ${cal.suggest} kcal target</button></div>`:''}
   <div class="card"><div class="row" style="margin-bottom:6px"><b>Today's meals (${wd})</b><span class="sp"></span><span class="tiny muted">tap ＋ when eaten</span></div>${slotRows}${offRows}</div>
@@ -314,15 +337,18 @@ function cookMode(r){const steps=r.steps||[];let i=0,timer=null;const el=documen
 
 // ---------- PLAN ----------
 function viewPlan(){const t=targets();
-  const days=DAYS.map(d=>{const slots=S.week[d]||{};const entries=SLOTS.map(s=>slots[s]).filter(Boolean);const tot=macroTotalsLog(entries);
-    const pOK=tot.protein_g>=t.protein-15,kClose=Math.abs(tot.kcal-t.kcal)<=200;
+  const days=DAYS.map((d,di)=>{const slots=S.week[d]||{};const entries=SLOTS.map(s=>slots[s]).filter(Boolean);const tot=macroTotalsLog(entries);
+    const dt=dayTarget(di);const pOK=tot.protein_g>=t.protein-15,kClose=Math.abs(tot.kcal-dt)<=200;
     const rows=SLOTS.map(sl=>{const s=slots[sl];return `<div class="slot"><span class="lab">${sl}</span><span class="nm ${s?'':'empty'}" data-pick="${d}|${sl}">${s?emoji(RX[s.r]||{})+' '+esc(s.r):'tap to add'}</span>${s?`<button class="chip" style="padding:3px 7px" data-port="${d}|${sl}">${s.p}×</button><button class="eat" data-clr="${d}|${sl}">✕</button>`:''}</div>`;}).join('');
-    return `<div class="card daycard"><div class="row"><b>${d}</b><span class="sp"></span><span class="tiny" style="${pOK?'color:var(--acc)':'color:var(--mut)'}">${n(tot.protein_g)}g P</span><span class="tiny" style="${kClose?'color:var(--acc)':'color:var(--amber)'}"> · ${n(tot.kcal)}/${t.kcal}</span><button class="chip sm" data-bal="${d}" style="margin-left:8px">⚖️</button></div>${rows}</div>`;}).join('');
-  return `<div class="card" style="background:var(--card2);box-shadow:none"><div class="small">Pre-filled & portion-balanced to your <b>${t.kcal} kcal · ${t.protein}g protein</b> target. Tap a meal to swap, the <b>N×</b> chip to resize a portion, or ⚖️ to auto-balance a day.</div></div>${days}<button class="btn" id="toshop" style="width:100%;margin-top:6px">🛒 Build shopping list from this week</button>`;}
+    return `<div class="card daycard"><div class="row"><b>${d}</b><span class="sp"></span><span class="tiny" style="${pOK?'color:var(--acc)':'color:var(--mut)'}">${n(tot.protein_g)}g P</span><span class="tiny" style="${kClose?'color:var(--acc)':'color:var(--amber)'}"> · ${n(tot.kcal)}/${dt}</span><button class="chip sm" data-bal="${d}|${di}" style="margin-left:8px">⚖️</button></div>${rows}</div>`;}).join('');
+  return `<div class="card" style="background:var(--card2);box-shadow:none"><div class="small">Portioned to your goal — <b>${goalLabel(t.rate)}</b> · <b>${t.kcal} kcal${S.settings.zigzag?' avg (zigzag)':''} · ${t.protein}g protein</b>/day. Tap a meal to swap, the <b>N×</b> chip to resize, or ⚖️ to auto-balance a day.</div></div>${days}
+   <button class="btn" id="rebuildweek" style="width:100%;margin-top:6px">✨ Rebuild my week for this goal</button>
+   <button class="btn sec" id="toshop" style="width:100%;margin-top:8px">🛒 Build shopping list from this week</button>`;}
 function bindPlan(){document.querySelectorAll('[data-pick]').forEach(s=>s.onclick=()=>pickRecipe(s.dataset.pick));
   document.querySelectorAll('[data-clr]').forEach(b=>b.onclick=()=>{const[d,sl]=b.dataset.clr.split('|');delete S.week[d][sl];save();render();});
   document.querySelectorAll('[data-port]').forEach(b=>b.onclick=()=>{const[d,sl]=b.dataset.port.split('|');const opts=[.5,.75,1,1.25,1.5,2];const cur=S.week[d][sl].p;S.week[d][sl].p=opts[(opts.indexOf(cur)+1)%opts.length];save();render();});
-  document.querySelectorAll('[data-bal]').forEach(b=>b.onclick=()=>{balanceDay(S.week[b.dataset.bal],targets().kcal);save();render();toast('Balanced to target');});
+  document.querySelectorAll('[data-bal]').forEach(b=>b.onclick=()=>{const[d,di]=b.dataset.bal.split('|');balanceDay(S.week[d],dayTarget(+di));save();render();toast('Balanced to target');});
+  document.getElementById('rebuildweek').onclick=()=>{buildWeekForGoal();render();toast('Week rebuilt for your goal');};
   document.getElementById('toshop').onclick=()=>{S.shopExtra=[];save();go('shop');toast('List built from your week');};}
 function pickRecipe(ds){const[d,sl]=ds.split('|');const el=document.createElement('div');el.className='sheet';el.id='picker';
   el.innerHTML=`<div class="shdr"><button class="btn sec sm" id="pclose">‹</button><b style="flex:1">${d} · ${sl}</b></div><div class="body"><input id="pq" type="search" placeholder="Search recipes…"><div class="rgrid" id="pgrid" style="margin-top:10px"></div></div>`;
@@ -368,13 +394,31 @@ function bindShop(){document.getElementById('hs').onchange=e=>{S.hideStaples=e.t
 // ---------- ME ----------
 function viewMe(){const t=targets(),s=S.settings;const exrows=EXCLUDES.map(([k,l])=>`<label class="toggle"><input type="checkbox" data-ex="${k}" ${S.excludes[k]?'checked':''}> ${l}</label>`).join('');
   const rm=S.reminders;
-  return `<div class="card"><b>Your numbers</b>
-    <div class="row" style="gap:8px;margin-top:10px"><div style="flex:1"><div class="tiny muted">Weight (lb)</div><input id="sw" type="number" value="${s.weightLb}"></div><div style="flex:1"><div class="tiny muted">Goal (lb)</div><input id="sg" type="number" value="${s.goalLb}"></div></div>
-    <div class="row" style="gap:8px;margin-top:8px"><div style="flex:1"><div class="tiny muted">Height (in)</div><input id="sh" type="number" value="${s.heightIn}"></div><div style="flex:1"><div class="tiny muted">Age</div><input id="sa" type="number" value="${s.age}"></div></div>
-    <div class="tiny muted" style="margin-top:10px">Activity</div><select id="sact"><option value="1.3" ${s.activity==1.3?'selected':''}>Mostly sitting</option><option value="1.4" ${s.activity==1.4?'selected':''}>Light — walks + Pilates 2×/wk</option><option value="1.55" ${s.activity==1.55?'selected':''}>Active — moving most days</option></select>
-    <div class="tiny muted" style="margin-top:10px">Phase</div><select id="sphase"><option value="cut" ${s.phase==='cut'?'selected':''}>Cutting to goal</option><option value="reverse" ${s.phase==='reverse'?'selected':''}>Reverse / settling</option><option value="maintain" ${s.phase==='maintain'?'selected':''}>Maintaining</option></select>
-    <button class="btn" id="ssave" style="width:100%;margin-top:12px">Save & recompute</button>
-    <div class="card" style="background:var(--card2);box-shadow:none;margin-top:12px"><div class="small">BMR <b>${t.bmr}</b> · maintenance <b>${t.maint}</b> kcal${s.manualKcal?' (measured)':''}<br>Target: <b>${t.kcal} kcal · ${t.protein}g protein · ${t.fiber}g fiber</b></div></div></div>
+  const goalRows=GOALS.map(([rate,label])=>{const k=goalKcal(t.tdee,rate),pct=Math.round(k/t.tdee*100),bad=k<t.floor,sel=s.goalRate==rate;
+    const kg=(Math.abs(rate)*0.4536).toFixed(2);
+    return `<tr data-goal="${rate}" style="cursor:pointer;${sel?'background:var(--card2)':''}">
+      <td>${sel?'✅ ':''}<b>${label}</b><div class="tiny muted">${rate==0?'&mdash;':`${Math.abs(rate)} lb (${kg} kg) / week`}</div></td>
+      <td style="text-align:right"><b style="${bad?'color:var(--red)':''}">${k}</b><div class="tiny muted">kcal/day · ${pct}%</div><div class="tiny muted">${(k*7).toLocaleString()} /wk</div>${bad?'<div class="tiny" style="color:var(--red)">below safe floor</div>':''}</td></tr>`;}).join('');
+  const zz=zigzagWeek(t.kcal);
+  return `<div class="card"><b>🧮 Calorie calculator</b>
+    <div class="tiny muted" style="margin:3px 0 10px">Same method as calculator.net — BMR × activity, then your goal.</div>
+    <div class="row" style="gap:8px"><div style="flex:1"><div class="tiny muted">Age</div><input id="sa" type="number" value="${s.age}"></div>
+      <div style="flex:1"><div class="tiny muted">Gender</div><select id="sgen"><option value="female" ${s.gender==='female'?'selected':''}>Female</option><option value="male" ${s.gender==='male'?'selected':''}>Male</option></select></div></div>
+    <div class="row" style="gap:8px;margin-top:8px"><div style="flex:1"><div class="tiny muted">Height (in)</div><input id="sh" type="number" value="${s.heightIn}"></div>
+      <div style="flex:1"><div class="tiny muted">Weight (lb)</div><input id="sw" type="number" value="${s.weightLb}"></div></div>
+    <div class="row" style="gap:8px;margin-top:8px"><div style="flex:1"><div class="tiny muted">Goal weight (lb)</div><input id="sg" type="number" value="${s.goalLb}"></div>
+      ${s.formula==='katch'?`<div style="flex:1"><div class="tiny muted">Body fat %</div><input id="sbf" type="number" value="${s.bodyFat}"></div>`:'<div style="flex:1"></div>'}</div>
+    <div class="tiny muted" style="margin-top:10px">Activity level</div><select id="sact">${ACTIVITY.map(([v,l])=>`<option value="${v}" ${s.activity==v?'selected':''}>${l}</option>`).join('')}</select>
+    <div class="tiny muted" style="margin-top:8px">BMR formula</div><select id="sform"><option value="mifflin" ${s.formula==='mifflin'?'selected':''}>Mifflin-St Jeor</option><option value="harris" ${s.formula==='harris'?'selected':''}>Revised Harris-Benedict</option><option value="katch" ${s.formula==='katch'?'selected':''}>Katch-McArdle (uses body fat)</option></select>
+    <button class="btn" id="ssave" style="width:100%;margin-top:12px">Recalculate</button>
+    <div class="card" style="background:var(--card2);box-shadow:none;margin-top:12px"><div class="small">BMR <b>${t.bmr}</b> · maintenance <b>${t.tdee}</b> kcal/day${s.manualKcal?' <span class="tiny">(measured from your logs)</span>':''}</div></div></div>
+  <div class="card"><b>🎯 Your goal</b><div class="tiny muted" style="margin:3px 0 8px">Tap a row — it becomes your daily target everywhere in the app.</div>
+    <div class="md"><table><tbody>${goalRows}</tbody></table></div>
+    ${t.unsafe?`<div class="nudge" style="border-color:var(--red);margin-top:10px"><span style="font-size:20px">⚠️</span><span class="small">Your target (${t.kcal}) is under the ${t.floor} kcal/day floor Harvard Health advises for ${s.gender==='female'?'women':'men'}. Pick a gentler goal unless a doctor is supervising you.</span></div>`:''}
+    <label class="toggle" style="margin-top:10px"><input type="checkbox" id="szig" ${s.zigzag?'checked':''}> <span>Zigzag calorie cycling <span class="tiny muted">— same weekly total, 3 higher / 4 lower days</span></span></label>
+    ${s.zigzag?`<div class="tiny muted" style="margin-top:5px">${DAYS.map((d,i)=>`${d} <b>${zz[i]}</b>`).join(' · ')}</div>`:''}
+    <button class="btn" id="buildweek" style="width:100%;margin-top:12px">✨ Recommend my week for this goal</button>
+    <div class="tiny muted" style="margin-top:6px">Fills your 7-day plan with high-protein recipes, portioned to hit ${s.zigzag?'each day’s zigzag':'this'} target (≥${t.protein}g protein/day).</div></div>
   <div class="card"><b>Foods to hide</b><div class="tiny muted" style="margin:4px 0 6px">Recipes that don't fit are hidden everywhere.</div>${exrows}</div>
   <div class="card"><b>Reminders</b><div class="tiny muted" style="margin:4px 0 6px">In-app nudges show on Today. Turn on phone notifications to get them as alerts.</div>
     <label class="toggle"><input type="checkbox" id="rm-prep" ${rm.prep?'checked':''}> Prep-day reminder (Sun/Wed)</label>
@@ -388,7 +432,11 @@ function viewMe(){const t=targets(),s=S.settings;const exrows=EXCLUDES.map(([k,l
     <button class="btn sec sm" id="reset" style="width:100%;margin-top:8px;color:var(--red)">Reset everything</button></div>
   <div class="card"><b>📲 Add to home screen</b><div class="small muted" style="margin-top:6px"><b>iPhone:</b> Safari → Share → “Add to Home Screen.” <b>Android:</b> Chrome menu → “Add to Home screen.”</div></div>`;}
 function bindMe(){
-  document.getElementById('ssave').onclick=()=>{const s=S.settings;s.weightLb=+document.getElementById('sw').value||s.weightLb;s.goalLb=+document.getElementById('sg').value||s.goalLb;s.heightIn=+document.getElementById('sh').value||s.heightIn;s.age=+document.getElementById('sa').value||s.age;s.activity=+document.getElementById('sact').value;s.phase=document.getElementById('sphase').value;s.manualKcal=null;save();toast('Updated');render();};
+  document.getElementById('ssave').onclick=()=>{const s=S.settings;s.weightLb=+document.getElementById('sw').value||s.weightLb;s.goalLb=+document.getElementById('sg').value||s.goalLb;s.heightIn=+document.getElementById('sh').value||s.heightIn;s.age=+document.getElementById('sa').value||s.age;s.activity=+document.getElementById('sact').value;s.gender=document.getElementById('sgen').value;s.formula=document.getElementById('sform').value;const bf=document.getElementById('sbf');if(bf)s.bodyFat=+bf.value||s.bodyFat;s.manualKcal=null;save();toast('Recalculated');render();};
+  document.getElementById('sform').onchange=e=>{S.settings.formula=e.target.value;save();render();};
+  document.querySelectorAll('[data-goal]').forEach(tr=>tr.onclick=()=>{const r=+tr.dataset.goal;S.settings.goalRate=r;S.settings.phase=r<0?'cut':r>0?'gain':'maintain';save();render();toast('Goal: '+goalLabel(r));});
+  document.getElementById('szig').onchange=e=>{S.settings.zigzag=e.target.checked;save();render();};
+  document.getElementById('buildweek').onclick=()=>{if(buildWeekForGoal()!==false){go('plan');toast('Week recommended for your goal');}};
   document.querySelectorAll('[data-ex]').forEach(c=>c.onchange=()=>{S.excludes[c.dataset.ex]=c.checked;save();});
   const rmap={'rm-prep':'prep','rm-weigh':'weigh','rm-prot':'protein','rm-notify':'notify'};
   Object.entries(rmap).forEach(([id,key])=>{const el=document.getElementById(id);el.onchange=async()=>{if(key==='notify'&&el.checked&&'Notification'in window){const p=await Notification.requestPermission();if(p!=='granted'){el.checked=false;toast('Notifications blocked');}}S.reminders[key]=el.checked;save();};});
@@ -404,18 +452,58 @@ function onboarding(){const el=document.createElement('div');el.className='ob';e
     `<h1 style="font-size:22px">Your numbers</h1><p class="muted small">Sets your calorie & protein targets — change anytime.</p>
       <div class="row" style="gap:8px;margin-top:12px"><div style="flex:1"><div class="tiny muted">Weight (lb)</div><input id="ow" type="number" value="${s.weightLb}"></div><div style="flex:1"><div class="tiny muted">Goal (lb)</div><input id="og" type="number" value="${s.goalLb}"></div></div>
       <div class="row" style="gap:8px;margin-top:8px"><div style="flex:1"><div class="tiny muted">Height (in)</div><input id="oh" type="number" value="${s.heightIn}"></div><div style="flex:1"><div class="tiny muted">Age</div><input id="oa" type="number" value="${s.age}"></div></div>
-      <div class="tiny muted" style="margin-top:10px">How active?</div><select id="oact"><option value="1.3">Mostly sitting</option><option value="1.4" selected>Light — walks + Pilates 2×/wk</option><option value="1.55">Active — moving most days</option></select>
+      <div class="tiny muted" style="margin-top:8px">Gender <span class="tiny">(the BMR formula needs it)</span></div><select id="ogen"><option value="female" ${s.gender==='female'?'selected':''}>Female</option><option value="male" ${s.gender==='male'?'selected':''}>Male</option></select>
+      <div class="tiny muted" style="margin-top:10px">How active?</div><select id="oact">${ACTIVITY.map(([v,l])=>`<option value="${v}" ${s.activity==v?'selected':''}>${l}</option>`).join('')}</select>
       <button class="btn" id="nx" style="width:100%;margin-top:18px">Next ›</button>`,
     `<h1 style="font-size:22px">Anything you avoid?</h1><p class="muted small">We'll hide recipes that don't fit. Skip if nothing applies.</p><div style="margin-top:10px">${EXCLUDES.map(([k,l])=>`<label class="toggle"><input type="checkbox" data-ox="${k}"> ${l}</label>`).join('')}</div><button class="btn" id="nx" style="width:100%;margin-top:18px">Finish ›</button>`,
   ][step];el.innerHTML=screens;
     if(step===2)el.querySelectorAll('[data-ox]').forEach(c=>c.onchange=()=>ex[c.dataset.ox]=c.checked);
     el.querySelector('#nx').onclick=()=>{
-      if(step===1){s.weightLb=+el.querySelector('#ow').value||s.weightLb;s.goalLb=+el.querySelector('#og').value||s.goalLb;s.heightIn=+el.querySelector('#oh').value||s.heightIn;s.age=+el.querySelector('#oa').value||s.age;s.activity=+el.querySelector('#oact').value;}
+      if(step===1){s.weightLb=+el.querySelector('#ow').value||s.weightLb;s.goalLb=+el.querySelector('#og').value||s.goalLb;s.heightIn=+el.querySelector('#oh').value||s.heightIn;s.age=+el.querySelector('#oa').value||s.age;s.activity=+el.querySelector('#oact').value;s.gender=el.querySelector('#ogen').value;}
       if(step<2){step++;paint();}else{S.settings=Object.assign(S.settings,s);S.settings.startDate=todayKey();S.excludes=ex;S.onboarded=true;DAYS.forEach(d=>balanceDay(S.week[d],targets().kcal));save();el.remove();render();toast('All set 🎉');}};}
   paint();document.body.appendChild(el);}
 
 // ---------- PWA + boot ----------
 if('serviceWorker'in navigator&&location.protocol.startsWith('http')){navigator.serviceWorker.register('sw.js').catch(()=>{});}
+// ---------- RECOMMEND A WEEK FOR THE SELECTED GOAL ----------
+// Takes the calculator's chosen goal (and zigzag day targets) and fills the 7-day plan with
+// recipes portioned to hit each day's calories while clearing the protein floor.
+// Finer-grained portion balance (0.05 steps) so a day can actually land on its target —
+// the 0.25-step user-facing balanceDay can't scale far enough for low zigzag days.
+function balanceFine(slots,target){let base=0;for(const k in slots)base+=(RX[slots[k].r]||{kcal:0}).kcal*slots[k].p;
+  if(base<=0)return;const f=target/base;
+  for(const k in slots)slots[k].p=Math.min(2.5,Math.max(0.4,Math.round(slots[k].p*f*20)/20));}
+function buildWeekForGoal(){
+  const t=targets();
+  const cat=c=>allR().filter(r=>r.category===c&&!isExcluded(r));
+  const B=cat('breakfast'),L=cat('lunch'),D=cat('dinner'),SN=cat('snacks').concat(cat('nocook'));
+  if(!B.length||!L.length||!D.length){toast('Not enough recipes match your filters');return false;}
+  const used={};
+  // lower score = better: fit the slot's calorie budget first, then your faves / protein / (lazy) effort
+  const score=(r,budget)=>Math.abs(r.kcal-budget)/budget
+      -(S.favorites.includes(r.name)?0.15:0)-(S.ratings[r.name]||0)*0.03
+      -(r.protein_g/100)*0.15
+      +(rState.lazy?effort(r).score*0.05:0);
+  const pick=(pool,budget)=>{const fresh=pool.filter(r=>!used[r.name]);
+    const r=(fresh.length?fresh:pool).slice().sort((a,b)=>score(a,budget)-score(b,budget))[0];
+    used[r.name]=1;return r;};
+  DAYS.forEach((d,i)=>{
+    const dt=dayTarget(i),slots={};
+    slots['Breakfast']={r:pick(B,dt*0.25).name,p:1};
+    slots['Lunch']={r:pick(L,dt*0.30).name,p:1};
+    slots['Dinner']={r:pick(D,dt*0.33).name,p:1};
+    if(SN.length)slots['Snack']={r:pick(SN,dt*0.12).name,p:1};
+    balanceFine(slots,dt);
+    // protein floor: swap dinner for the most protein-dense unused option, then re-balance
+    if(macroTotalsLog(Object.values(slots)).protein_g<t.protein){
+      const byProt=D.slice().sort((a,b)=>b.protein_g-a.protein_g);
+      const boost=byProt.find(r=>!used[r.name])||byProt.find(r=>!Object.values(slots).some(x=>x.r===r.name));
+      if(boost){used[boost.name]=1;slots['Dinner']={r:boost.name,p:1};balanceFine(slots,dt);}
+    }
+    S.week[d]=slots;
+  });
+  save();return true;
+}
 // ---------- EFFORT (laziness score) ----------
 function effort(r){
   const noCook=(r.tags||[]).some(t=>/no-cook|5-min|assemble|2-min|blender|girl-dinner/.test(t))||r.category==='nocook';
